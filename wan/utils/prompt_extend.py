@@ -13,12 +13,12 @@ import dashscope
 import torch
 from PIL import Image
 
-try:
-    from flash_attn import flash_attn_varlen_func
-    FLASH_VER = 2
-except ModuleNotFoundError:
-    flash_attn_varlen_func = None  # in compatible with CPU machines
-    FLASH_VER = None
+#try:
+#    from flash_attn import flash_attn_varlen_func
+#   FLASH_VER = 2
+#except ModuleNotFoundError:
+#    flash_attn_varlen_func = None  # in compatible with CPU machines
+#    FLASH_VER = None
 
 LM_ZH_SYS_PROMPT = \
     '''你是一位Prompt优化师，旨在将用户输入改写为优质Prompt，使其更完整、更具表现力，同时不改变原意。\n''' \
