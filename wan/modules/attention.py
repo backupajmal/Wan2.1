@@ -67,8 +67,8 @@ class LinformerAttention(nn.Module):
             q = q * q_scale
 
         # Use only the first Lk rows of the projection matrices.
-        proj_k = self.proj_k[:Lk]  # shape [Lk, r]
-        proj_v = self.proj_v[:Lk]  # shape [Lk, r]
+        proj_k = self.proj_k[:Lk]  # shape: [Lk, r]
+        proj_v = self.proj_v[:Lk]  # shape: [Lk, r]
 
         # Project keys and values along the sequence dimension.
         # k_proj: [B, r, H, C]
@@ -79,15 +79,15 @@ class LinformerAttention(nn.Module):
         attn_scores = torch.einsum("blhc,brhc->bhlr", q, k_proj) * softmax_scale
 
         if causal:
-            # Simple causal mask: note r is not exactly time-indexed,
-            # so this is an approximation.
+            # Create a simple causal mask. Note: since r is a projected dimension,
+            # this mask is only an approximation.
             mask = torch.triu(torch.full((Lq, attn_scores.size(-1)), float("-inf")), diagonal=1).to(attn_scores.device)
             attn_scores = attn_scores + mask.unsqueeze(0).unsqueeze(0)
 
         attn_probs = F.softmax(attn_scores, dim=-1)
         attn_probs = self.dropout(attn_probs)
 
-        # Weighted sum over projected values: [B, Lq, H, C]
+        # Compute weighted sum over projected values: [B, Lq, H, C]
         output = torch.einsum("bhlr,brhc->blhc", attn_probs, v_proj)
         return output
 
@@ -111,7 +111,6 @@ def flash_attention(
     version=None,
 ):
     """
-    Flash attention implementation.
     q:              [B, Lq, Nq, C1].
     k:              [B, Lk, Nk, C1].
     v:              [B, Lk, Nk, C2]. Nq must be divisible by Nk.
@@ -133,14 +132,14 @@ def flash_attention(
     def half(x):
         return x if x.dtype in half_dtypes else x.to(dtype)
 
-    # Preprocess queries
+    # Preprocess queries.
     if q_lens is None:
         q = half(q.flatten(0, 1))
         q_lens = torch.tensor([lq] * b, dtype=torch.int32, device=q.device)
     else:
         q = half(torch.cat([u[:v] for u, v in zip(q, q_lens)]))
 
-    # Preprocess keys and values
+    # Preprocess keys and values.
     if k_lens is None:
         k = half(k.flatten(0, 1))
         v = half(v.flatten(0, 1))
@@ -192,11 +191,11 @@ def flash_attention(
             ).unflatten(0, (b, lq))
     except RuntimeError as e:
         if "FlashAttention only supports Ampere GPUs or newer" in str(e):
-            # Fallback: use scaled_dot_product_attention for older GPUs.
-            from torch import nn
-            q = q.view(b, lq, -1).transpose(1, 2).to(dtype)
-            k = k.view(b, lk, -1).transpose(1, 2).to(dtype)
-            v = v.view(b, lk, -1).transpose(1, 2).to(dtype)
+            # Fallback for older GPUs: use standard scaled_dot_product_attention.
+            # Here, q, k, v are assumed to be of shape [B, L, N, C]. We convert them to [B, N, L, C].
+            q = q.transpose(1, 2).contiguous().to(dtype)
+            k = k.transpose(1, 2).contiguous().to(dtype)
+            v = v.transpose(1, 2).contiguous().to(dtype)
             if softmax_scale is None:
                 softmax_scale = 1.0 / (q.size(-1) ** 0.5)
             if q_scale is not None:
@@ -206,7 +205,7 @@ def flash_attention(
             else:
                 attn_mask = None
             x = nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
-            x = x.transpose(1, 2).contiguous()
+            x = x.transpose(1, 2).contiguous()  # Convert back to [B, L, N, C]
         else:
             raise
     return x.type(out_dtype)
@@ -232,8 +231,8 @@ def attention(
 ):
     """
     Unified attention function.
-    If flash attention (FA) libraries are available, it uses FA.
-    Otherwise, it falls back to a Linformer-style attention module.
+    If flash attention libraries are available and run successfully, use them.
+    Otherwise, fall back to a Linformer-style attention module.
     """
     if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
         try:
@@ -255,11 +254,10 @@ def attention(
         except RuntimeError as e:
             warnings.warn(f"Flash attention failed with error: {e}. Falling back to Linformer attention.")
     # Fallback: Use Linformer attention.
-    # Ensure input q, k, v are of shape [B, L, H, C].
+    # q, k, v are assumed to be of shape [B, L, H, C].
     B, Lq, H, C = q.shape
     _, Lk, _, _ = k.shape
-    # Instantiate LinformerAttention with a fixed projection dimension (adjust as needed).
-    # Here we set projection_dim to a default value (e.g., 64) or you can choose Lk // reduction_factor.
+    # Set a default projection dimension. You may adjust this hyperparameter.
     projection_dim = 64  
     linformer_attn = LinformerAttention(max_seq_len=Lk, projection_dim=projection_dim, head_dim=C, dropout_p=dropout_p).to(q.device)
     return linformer_attn(q, k, v, q_scale=q_scale, softmax_scale=softmax_scale, causal=causal)
